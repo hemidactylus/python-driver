@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import os
 import logging
 import json
@@ -19,7 +20,7 @@ import sys
 import tempfile
 import shutil
 import six
-from six.moves.urllib.request import urlopen
+from six.moves.urllib.request import urlopen, Request
 
 _HAS_SSL = True
 try:
@@ -81,13 +82,18 @@ def get_cloud_config(cloud_config, create_pyopenssl_context=False):
     if not _HAS_SSL:
         raise DriverException("A Python installation with SSL is required to connect to a cloud cluster.")
 
-    if 'secure_connect_bundle' not in cloud_config:
-        raise ValueError("The cloud config doesn't have a secure_connect_bundle specified.")
+    if 'secure_connect_bundle' not in cloud_config and 'zb_api_key' not in cloud_config and 'zb_string' not in cloud_config:
+        raise ValueError("The cloud config doesn't have a secure_connect_bundle/zb_api_key/zb_string specified.")
 
-    try:
-        config = read_cloud_config_from_zip(cloud_config, create_pyopenssl_context)
-    except BadZipFile:
-        raise ValueError("Unable to open the zip file for the cloud config. Check your secure connect bundle.")
+    if 'secure_connect_bundle' in cloud_config:
+        try:
+            config = read_cloud_config_from_zip(cloud_config, create_pyopenssl_context)
+        except BadZipFile:
+            raise ValueError("Unable to open the zip file for the cloud config. Check your secure connect bundle.")
+    elif 'zb_api_key' in cloud_config:
+        config = build_cloud_config_from_zb_api(cloud_config, create_pyopenssl_context)
+    elif 'zb_string' in cloud_config:
+        config = build_cloud_config_from_zb_string(cloud_config, create_pyopenssl_context)
 
     config = read_metadata_info(config, cloud_config)
     if create_pyopenssl_context:
@@ -106,6 +112,64 @@ def read_cloud_config_from_zip(cloud_config, create_pyopenssl_context):
             return parse_cloud_config(os.path.join(tmp_dir, 'config.json'), cloud_config, create_pyopenssl_context)
         finally:
             shutil.rmtree(tmp_dir)
+
+
+def build_cloud_config_from_zb_api(cloud_config, create_pyopenssl_context):
+    ZB_API_BASE_URL = 'http://localhost:8000'  # TEMPORARY PoC VALUE
+    zb_api_url = ZB_API_BASE_URL + '/get_bundle_data'
+    zb_api_data = json.dumps({'zb_api_key': cloud_config['zb_api_key']}).encode()
+    zb_api_headers = {'Content-Type': 'application/json'}
+    zb_request = Request(
+        url=zb_api_url,
+        data=zb_api_data,
+        headers=zb_api_headers,
+        method='POST',
+    )
+    zb_response = urlopen(zb_request)
+    zb_data = json.loads(zb_response.read().decode('utf-8'))
+    #
+    use_default_tempdir = cloud_config.get('use_default_tempdir', None)
+    base_dir = tempfile.gettempdir()  # if use_default_tempdir else os.path.dirname(secure_bundle)
+    tmp_dir = tempfile.mkdtemp(dir=base_dir)
+    #
+    try:
+        #
+        with open(os.path.join(tmp_dir, 'config.json'), 'w') as json_file:
+            json_file.write(zb_data['config_data'])
+        with open(os.path.join(tmp_dir, 'ca.crt'), 'w') as json_file:
+            json_file.write(zb_data['ca_cert_data'])
+        with open(os.path.join(tmp_dir, 'cert'), 'w') as json_file:
+            json_file.write(zb_data['cert_data'])
+        with open(os.path.join(tmp_dir, 'key'), 'w') as json_file:
+            json_file.write(zb_data['key_data'])
+        #
+        return parse_cloud_config(os.path.join(tmp_dir, 'config.json'), cloud_config, create_pyopenssl_context)
+    finally:
+        shutil.rmtree(tmp_dir)
+
+
+def build_cloud_config_from_zb_string(cloud_config, create_pyopenssl_context):
+    zb_string = cloud_config['zb_string']
+    zb_data = json.loads(base64.b64decode(zb_string).decode())
+    #
+    use_default_tempdir = cloud_config.get('use_default_tempdir', None)
+    base_dir = tempfile.gettempdir()  # if use_default_tempdir else os.path.dirname(secure_bundle)
+    tmp_dir = tempfile.mkdtemp(dir=base_dir)
+    #
+    try:
+        #
+        with open(os.path.join(tmp_dir, 'config.json'), 'w') as json_file:
+            json_file.write(zb_data['config_data'])
+        with open(os.path.join(tmp_dir, 'ca.crt'), 'w') as json_file:
+            json_file.write(zb_data['ca_cert_data'])
+        with open(os.path.join(tmp_dir, 'cert'), 'w') as json_file:
+            json_file.write(zb_data['cert_data'])
+        with open(os.path.join(tmp_dir, 'key'), 'w') as json_file:
+            json_file.write(zb_data['key_data'])
+        #
+        return parse_cloud_config(os.path.join(tmp_dir, 'config.json'), cloud_config, create_pyopenssl_context)
+    finally:
+        shutil.rmtree(tmp_dir)
 
 
 def parse_cloud_config(path, cloud_config, create_pyopenssl_context):
